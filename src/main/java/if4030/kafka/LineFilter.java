@@ -6,7 +6,6 @@ import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.KStream;
-import org.apache.kafka.streams.kstream.KTable;
 import org.apache.kafka.streams.kstream.Produced;
 
 import java.io.FileInputStream;
@@ -52,6 +51,7 @@ public final class LineFilter {
             .flatMapValues(value -> Arrays.asList(value.toLowerCase(Locale.getDefault()).split("[\\s\\p{Punct}&&[^-]]+")))
             .filter((key, value) -> Pattern.matches("[a-zàâçéèêëîïôûùüÿñæœ]+(-[a-zàâçéèêëîïôûùüÿñæœ]+)*", value));
         
+        filterStream.peek(( key, word ) -> System.out.println( "key: " + key + " - word: " + word ));
         filterStream.to(OUTPUT_TOPIC,Produced.with(Serdes.String(), Serdes.String()));
     }
 
