@@ -1,9 +1,6 @@
 package if4030.kafka;
 
 import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
@@ -12,7 +9,6 @@ import org.apache.kafka.streams.kstream.KStream;
 
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.time.Duration;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -25,6 +21,8 @@ public final class WordCountCategory {
 
     public static final String INPUT_TOPIC = "tagged-words-stream";
     public static final String LISTEN_TOPIC = "command-topic";
+
+    private static final Integer DEFAULT_TOP_NUMBER = 20;
 
     static Properties getStreamsConfig(final String[] args) throws IOException {
         final Properties props = new Properties();
@@ -45,71 +43,118 @@ public final class WordCountCategory {
         // setting offset reset to earliest so that we can re-run the demo code with the same pre-loaded data
         // Note: To re-run the demo, you need to use the offset reset tool:
         // https://cwiki.apache.org/confluence/display/KAFKA/Kafka+Streams+Application+Reset+Tool
-        props.putIfAbsent(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.putIfAbsent(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
         return props;
     }
 
-    static void createWordCountCategoryStream(final StreamsBuilder builder) throws IOException {
-        final KStream<String, String> source = builder.stream(INPUT_TOPIC);
+    static void createWordCountCategoryStream(final StreamsBuilder builder, CountDownLatch latch) throws IOException {
+        final KStream<String, String> source = builder.stream(Arrays.asList(INPUT_TOPIC, LISTEN_TOPIC));
         Map<String,Map<String, Integer>> wordCountsByCategory = new HashMap<>();
-        
-        Properties props = getStreamsConfig(null);
-        props.put("ConsumerConfig.GROUP_ID_CONFIG", "command-consumer");
-        props.put("key.deserializer","org.apache.kafka.common.serialization.StringDeserializer");  
-        props.put("value.deserializer","org.apache.kafka.common.serialization.StringDeserializer");
-        KafkaConsumer<String,String> kafkaConsumer = new KafkaConsumer<>(props);
-        kafkaConsumer.subscribe(Arrays.asList(INPUT_TOPIC, LISTEN_TOPIC));
 
-        while (true) {
-            ConsumerRecords<String, String> records = kafkaConsumer.poll(Duration.ofMillis(100));
-            for (ConsumerRecord<String, String> record : records) {
-                String topic = record.topic();
-                if (topic.equals(INPUT_TOPIC)) {
-                    source.foreach((key, value) -> {
-                        String word = value;
-                        String category = key;
-                        wordCountsByCategory.putIfAbsent(category, new HashMap<>());
-                        Map<String, Integer> wordCounts = wordCountsByCategory.get(category);
-                        wordCounts.put(word, wordCounts.getOrDefault(word, 0) + 1);
-                    }); 
-                } else if (topic.equals(LISTEN_TOPIC)) {
-                    if (record.value().equals("END")) {
-                        topWordsByCategory(wordCountsByCategory);
-                        kafkaConsumer.close();
+        source.foreach((key, value) -> {
+            String word = value;
+            String category = key;
+
+            if (key == null && value != null) {
+                String[] parts = value.split(" ");
+                String command = parts[0];
+                String[] args = parts.length > 1 ? Arrays.copyOfRange(parts, 1, parts.length) : null;
+                switch (command) {
+                    case "END":
+                        handleEndCommand(args, wordCountsByCategory, latch);
                         return;
-                    }
+                    
+                    case "DISPLAY":
+                        handleDisplayCommand(args, wordCountsByCategory);
+                        return;
+                    
+                    case "RESET":
+                        handleResetCommand(args, wordCountsByCategory);
+                        return;
+                    
+                    default:
+                        return;
                 }
+
+            } else if (category != null && word != null) {
+                wordCountsByCategory.putIfAbsent(category, new HashMap<>());
+                Map<String, Integer> wordCounts = wordCountsByCategory.get(category);
+                wordCounts.put(word, wordCounts.getOrDefault(word, 0) + 1);
             }
+        });
+    }
+
+    private static void topWordsByCategory(Map<String, Map<String, Integer>> wordCountsByCategory, Integer topNumber) {
+        for (Map.Entry<String, Map<String, Integer>> entry : wordCountsByCategory.entrySet()) {
+            topWordsInCategory(wordCountsByCategory, entry.getKey(), topNumber);
         }
     }
 
-    private static void topWordsByCategory(Map<String, Map<String, Integer>> wordCountsByCategory) {
-        for (Map.Entry<String, Map<String, Integer>> entry : wordCountsByCategory.entrySet()) {
-            System.out.println("Category: " + entry.getKey());
-            Map<String, Integer> wordCounts = entry.getValue();
-            PriorityQueue<Map.Entry<String, Integer>> pq = new PriorityQueue<>(
-                    Comparator.comparingInt(Map.Entry::getValue));
-            for (Map.Entry<String, Integer> wordEntry : wordCounts.entrySet()) {
-                pq.offer(wordEntry);
-                if (pq.size() > 20) {
-                    pq.poll();
-                }
-            }
-            
-            while (!pq.isEmpty()) {
-                Map.Entry<String, Integer> topEntry = pq.poll();
-                System.out.println(topEntry.getKey() + ": " + topEntry.getValue());
+    private static void topWordsInCategory(Map<String, Map<String, Integer>> wordCountsByCategory, String category, Integer topNumber) {
+        if (category == null || !wordCountsByCategory.containsKey(category)) {
+            return;
+        }
+
+        System.out.println("Category: " + category);
+        Map<String, Integer> wordCounts = wordCountsByCategory.get(category);
+        PriorityQueue<Map.Entry<String, Integer>> pq = new PriorityQueue<>(Comparator.comparingInt(Map.Entry<String, Integer>::getValue));
+        for (Map.Entry<String, Integer> wordEntry : wordCounts.entrySet()) {
+            pq.offer(wordEntry);
+            if (pq.size() > topNumber) {
+                pq.poll();
             }
         }
+
+        while (!pq.isEmpty()) {
+            Map.Entry<String, Integer> topEntry = pq.poll();
+            System.out.println(topEntry.getKey() + ": " + topEntry.getValue());
+        }
+    }
+
+    private static void handleEndCommand(String[] args, Map<String, Map<String, Integer>> wordCountsByCategory, CountDownLatch latch) {
+        handleDisplayCommand(args, wordCountsByCategory);
+        latch.countDown();
+    }
+
+    private static void handleDisplayCommand(String[] args, Map<String, Map<String, Integer>> wordCountsByCategory) {
+        if (args == null) {
+            topWordsByCategory(wordCountsByCategory, DEFAULT_TOP_NUMBER);
+            return;
+        }
+        
+        if (args.length == 1) {
+            String arg = args[0];
+            if (arg.matches("\\d+")) {
+                topWordsByCategory(wordCountsByCategory, Integer.parseInt(arg));
+            } else {
+                topWordsInCategory(wordCountsByCategory, arg, DEFAULT_TOP_NUMBER);
+            }
+            return;
+        }
+
+        if (args.length == 2) {
+            String arg1 = args[0];
+            String arg2 = args[1];
+            if (arg1.matches("\\d+")) {
+                topWordsInCategory(wordCountsByCategory, arg2, Integer.parseInt(arg1));
+            } else if (arg2.matches("\\d+")) {
+                topWordsInCategory(wordCountsByCategory, arg1, Integer.parseInt(arg2));
+            }
+            return;
+        }
+    }
+
+    private static void handleResetCommand(String[] args, Map<String, Map<String, Integer>> wordCountsByCategory) {
+        wordCountsByCategory.clear();
     }
 
     public static void main(final String[] args) throws IOException {
         final Properties props = getStreamsConfig(args);
 
         final StreamsBuilder builder = new StreamsBuilder();
-        createWordCountCategoryStream(builder);
-        final KafkaStreams streams = new KafkaStreams(builder.build(), props);
         final CountDownLatch latch = new CountDownLatch(1);
+        createWordCountCategoryStream(builder, latch);
+        final KafkaStreams streams = new KafkaStreams(builder.build(), props);
 
         // attach shutdown handler to catch control-c
         Runtime.getRuntime().addShutdownHook(new Thread("streams-count-category-shutdown-hook") {
@@ -125,7 +170,10 @@ public final class WordCountCategory {
             latch.await();
         } catch (final Throwable e) {
             System.exit(1);
+        } finally {
+            streams.close();
         }
+
         System.exit(0);
     }
 }
