@@ -49,7 +49,7 @@ public final class WordLemmatization {
         return props;
     }
 
-    static void createLineFilterStream(final StreamsBuilder builder) throws IOException {
+    static void createWordLemmatizationStream(final StreamsBuilder builder) throws IOException {
         final KStream<String, String> source = builder.stream(INPUT_TOPIC);
         Map<String,List<String>> lexique = Lexique();
 
@@ -96,7 +96,7 @@ public final class WordLemmatization {
         final Properties props = getStreamsConfig(args);
 
         final StreamsBuilder builder = new StreamsBuilder();
-        createLineFilterStream(builder);
+        createWordLemmatizationStream(builder);
         final KafkaStreams streams = new KafkaStreams(builder.build(), props);
         final CountDownLatch latch = new CountDownLatch(1);
 
